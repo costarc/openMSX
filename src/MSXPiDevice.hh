@@ -64,6 +64,20 @@ private:
 	// when they are not.  Set <wait_cycles> in the extension XML once it has.
 	unsigned waitCycles = 0;
 
+	// Fault injection: make every Nth wait-mode read behave as it does on
+	// real hardware when RPI_READY happens to be low - return whatever is on
+	// the bus instead of stalling.  0 disables it.
+	//
+	// This exists because the emulation cannot otherwise produce that case at
+	// all: a wait-mode read here always blocks until a byte arrives, so there
+	// is no window for a stale read.  On real hardware the Pi drops RDY
+	// between bytes while it runs its Python dispatch, and a read landing in
+	// that gap silently returns garbage - which is how /WAIT passed in
+	// emulation while being broken on hardware, and later how a transaction
+	// failing once in ~1500 calls went unnoticed until it killed the link.
+	unsigned rdyFailEvery = 0;
+	unsigned rdyCounter = 0;
+
 };
 
 } // namespace openmsx

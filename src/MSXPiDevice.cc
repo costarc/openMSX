@@ -11,6 +11,7 @@ namespace openmsx {
 MSXPiDevice::MSXPiDevice(const DeviceConfig& config)
 	: MSXDevice(config)
 	, waitCycles(unsigned(config.getChildDataAsInt("wait_cycles", 0)))
+	, rdyFailEvery(unsigned(config.getChildDataAsInt("rdy_fail_every", 0)))
 {
 	thread = std::thread(&MSXPiDevice::readLoop, this);
 	reset(EmuTime::dummy());
@@ -71,6 +72,11 @@ byte MSXPiDevice::readIO(uint16_t port, EmuTime time)
 			// from a socket whenever the server gets round to it.
 			if (waitCycles > 0) {
 				time = getCPU().waitCyclesZ80(time, waitCycles);
+			}
+
+			// Fault injection: emulate RPI_READY being low for this read.
+			if (rdyFailEvery && (++rdyCounter % rdyFailEvery) == 0) {
+				return 0xff; // stale bus, exactly as hardware does
 			}
 
 			static constexpr auto RX_STALL_TIMEOUT = std::chrono::milliseconds(250);
