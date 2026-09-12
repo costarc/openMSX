@@ -7,7 +7,7 @@
 #endif
 #include "xrange.hh"
 #include <algorithm>
-#include <array>
+#include <vector>
 
 namespace openmsx {
 
@@ -191,6 +191,19 @@ void MSXPiDevice::writeIO(uint16_t port, byte value, EmuTime time)
 
 void MSXPiDevice::readLoop()
 {
+	// 64 KB: at or above the usual socket receive buffer, so a burst is taken
+	// in about one syscall.  Allocated once here rather than per iteration,
+	// and on the heap rather than the stack - a buffer this size is not
+	// something to put on a thread stack.
+	//
+	// MAX_QUEUE_SIZE is deliberately far larger than any single block: the
+	// queue only ever grows to what is actually used (cb_queue starts at zero
+	// capacity and doubles), so the ceiling costs nothing until a transfer
+	// needs it.  Now that nothing is discarded it is a throughput knob rather
+	// than a correctness limit: too small merely stalls, it cannot lose data.
+	static constexpr size_t MAX_QUEUE_SIZE = 64 * 1024;
+	std::vector<char> buf(64 * 1024);
+
 	while (!shouldStop) {
 		if (sock == OPENMSX_INVALID_SOCKET) {
 			sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -228,20 +241,63 @@ void MSXPiDevice::readLoop()
 			continue; // error or abort
 		}
 #endif
-		std::array<char, 64> buf;
-		auto n = sock_recv(sock, buf.data(), buf.size());
+		// Check for room BEFORE reading, and read only that much, rather than
+		// reading blindly and discarding what will not fit.  The old code capped the queue at 16 KB and threw
+		// the rest away - "skip excess bytes" - which meant the device silently
+		// lied about what it had received: the server had sent the bytes, the
+		// MSX never saw them, and nothing anywhere reported an error.  A block
+		// of 16384 plus its 4-byte header and checksum came to 16389, five over
+		// the cap, so every large pcopy download lost its tail - including the
+		// checksum byte the MSX then waited for for ever.
+		//
+		// Not reading is all that is needed: the socket buffer fills, TCP
+		// closes its window, and the server's sendall() blocks until the MSX
+		// catches up.  That is also how real hardware behaves, where the GPIO
+		// transport is synchronous and the server can never run ahead.
+		//
+		size_t room;
+		{
+			std::lock_guard lock(mtx);
+			room = MAX_QUEUE_SIZE - std::min(rxQueue.size(), MAX_QUEUE_SIZE);
+		}
+		if (room == 0) {
+			// Full: let the MSX drain and look again.  A short sleep rather
+			// than a condition variable signalled from readIO, because that
+			// signal would fire on EVERY byte the MSX takes - and precisely
+			// when it matters, with the queue full, each one would wake this
+			// thread to read a single byte.  A syscall per byte is the
+			// opposite of what the back-pressure is for.  The MSX drains at a
+			// few hundred bytes a second, so polling costs nothing and the
+			// queue only fills in the first place if the server has run far
+			// ahead.
+			Timer::sleep(1'000); // 1 ms
+			continue;
+		}
+
+		auto n = sock_recv(sock, buf.data(), std::min(buf.size(), room));
 		if (n < 0) { // error
 			close();
 			continue;
 		}
-		std::lock_guard lock(mtx);
-
-		// skip excess bytes
-		static constexpr size_t MAX_QUEUE_SIZE = 16 * 1024;
-		for (auto i : xrange(std::min<size_t>(n, MAX_QUEUE_SIZE - rxQueue.size()))) {
-			rxQueue.push_back(buf[i]);
+		// Hand the bytes over in small batches rather than under one lock.
+		// The emulated Z80 takes this same mutex on EVERY status poll, so a
+		// reader holding it across tens of thousands of push_back calls - plus
+		// cb_queue's doubling reallocations, which move the whole buffer -
+		// stalls the CPU thread for exactly that long.  Emulation is throttled
+		// to 3.58 MHz, so every cycle lost waiting on the lock is real time the
+		// transfer never gets back.
+		//
+		// The socket read stays large: syscalls are worth batching, holding a
+		// mutex is not.
+		static constexpr size_t BATCH = 512;
+		for (size_t off = 0; off < size_t(n); off += BATCH) {
+			auto end = std::min(off + BATCH, size_t(n));
+			std::lock_guard lock(mtx);
+			for (auto i : xrange(off, end)) {
+				rxQueue.push_back(buf[i]);
+			}
+			rxCv.notify_one(); // release a wait-mode read blocked in readIO
 		}
-		rxCv.notify_one(); // release a wait-mode read blocked in readIO
 	}
 }
 
