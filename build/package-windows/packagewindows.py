@@ -25,7 +25,7 @@ def generateInstallFiles(info):
 	emptyOrCreateDirectory(info.makeInstallPath)
 	installAll(
 		info.makeInstallPath + sep, 'bin', 'share', 'doc',
-		info.openmsxExePath, 'mingw32', True, True
+		info.openmsxExePath, 'msvc', True, True
 		)
 
 class PackageInfo(object):
