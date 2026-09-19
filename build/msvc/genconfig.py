@@ -24,7 +24,7 @@ def genConfig(platform, configuration, outputPath):
 	# build-info.hh
 	#
 	buildInfoHeader = os.path.join(outputPath, 'build-info.hh')
-	targetPlatform = 'msvc'
+	targetPlatform = 'mingw32'
 	if platform == 'Win32':
 		targetCPU = 'x86'
 	elif platform == 'x64':
